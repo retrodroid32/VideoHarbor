@@ -1,28 +1,73 @@
 name: Build Android APK
+
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   debug-apk:
+    name: Build VideoHarbor APK
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
+
       - name: Install Android SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Verify Java and JavaScript source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs/test-classes
+          javac -d build-logs/test-classes \
+            app/src/main/java/com/example/videoharbor/VideoUrlUtils.java \
+            tests/VideoUrlUtilsTest.java
+          java -cp build-logs/test-classes VideoUrlUtilsTest
+          node tests/video_detector.test.js
+
+      - name: Build debug APK with detailed error log
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build-logs
+          java -version 2>&1 | tee build-logs/environment.log
+          gradle --version 2>&1 | tee -a build-logs/environment.log
+          gradle --no-daemon --stacktrace --console=plain \
+            :app:assembleDebug 2>&1 | tee build-logs/gradle-build.log
+
+      - name: Upload debugging logs when build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoHarbor-build-failure-logs
+          path: build-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
           name: VideoHarbor-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
