@@ -88,4 +88,47 @@ public final class VideoUrlUtils {
             return "unknown host";
         }
     }
+
+    /** Recognize actual YouTube video pages without matching unrelated domains. */
+    public static boolean isYoutubeVideoPage(String candidate) {
+        if (!isHttpsUrl(candidate)) return false;
+        try {
+            URI uri = new URI(candidate.trim());
+            String host = uri.getHost().toLowerCase(Locale.ROOT);
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            if (host.equals("youtu.be") || host.equals("www.youtu.be")) {
+                return path.matches("/[A-Za-z0-9_-]{11}/?");
+            }
+            boolean youtubeHost = host.equals("youtube.com")
+                    || host.endsWith(".youtube.com")
+                    || host.equals("youtube-nocookie.com")
+                    || host.endsWith(".youtube-nocookie.com");
+            if (!youtubeHost) return false;
+            if (path.matches("/(shorts|live|embed)/[A-Za-z0-9_-]{11}/?")) return true;
+            if (!path.equals("/watch")) return false;
+            String rawQuery = uri.getRawQuery();
+            if (rawQuery == null) return false;
+            for (String pair : rawQuery.split("&")) {
+                if (pair.startsWith("v=") && pair.substring(2).matches("[A-Za-z0-9_-]{11}")) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** A media CDN URL is not the same thing as a downloadable complete file. */
+    public static boolean isYoutubeStreamEndpoint(String candidate) {
+        if (!isHttpsUrl(candidate)) return false;
+        try {
+            URI uri = new URI(candidate.trim());
+            String host = uri.getHost().toLowerCase(Locale.ROOT);
+            return (host.equals("googlevideo.com") || host.endsWith(".googlevideo.com"))
+                    && (uri.getPath() != null && uri.getPath().contains("videoplayback"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
 }
