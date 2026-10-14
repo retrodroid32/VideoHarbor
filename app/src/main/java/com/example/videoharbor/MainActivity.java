@@ -64,6 +64,7 @@ public final class MainActivity extends Activity {
     private static final int WHITE = Color.rgb(235, 245, 255);
     private static final int MUTED = Color.rgb(155, 177, 195);
     private static final int PERMISSION_STORAGE = 37;
+    private static final int PERMISSION_EXTRACTOR_STORAGE = 38;
     private static final int MAX_CANDIDATES = 70;
 
     private FrameLayout screen;
@@ -81,6 +82,8 @@ public final class MainActivity extends Activity {
     private String currentPage = "";
     private String currentPageTitle = "";
     private DownloadJob pendingPermissionDownload;
+    private String pendingExtractorUrl;
+    private PageExtractor pageExtractor;
     private final LinkedHashMap<String, VideoCandidate> videos = new LinkedHashMap<>();
 
     private static final class DownloadJob {
@@ -102,6 +105,7 @@ public final class MainActivity extends Activity {
         detectorScript = readDetectorScript();
         buildUi();
         configureBrowser();
+        pageExtractor = new PageExtractor(this, status -> pageStatus.setText(status));
         readSharedUrl(getIntent());
         if (Build.VERSION.SDK_INT >= 33) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -402,7 +406,7 @@ public final class MainActivity extends Activity {
                 + "<div class='step'><b>1.</b> Paste a webpage address at the top.</div>"
                 + "<div class='step'><b>2.</b> Open or play the video, then tap <b>Find videos</b>.</div>"
                 + "<div class='step'><b>3.</b> Select a result and tap <b>Download</b>.</div>"
-                + "<p>Supports direct MP4, WebM and other common video files. DRM, blob streams, HLS and DASH are not supported.</p>"
+                + "<p>Direct MP4/WebM downloads work on ordinary websites. Use the page extractor for supported sites including public YouTube videos. DRM and restricted media are not supported.</p>"
                 + "</body></html>";
         browser.loadDataWithBaseURL("https://appassets.androidplatform.net/", html, "text/html", "UTF-8", null);
     }
@@ -481,10 +485,13 @@ public final class MainActivity extends Activity {
     private void showVideos() {
         if (videos.isEmpty()) {
             new AlertDialog.Builder(this)
-                    .setTitle("No video files detected")
-                    .setMessage("Play the video on the webpage and tap Find videos again. "
-                            + "Some sites use protected streams, blob URLs or separate players that this app cannot download.")
-                    .setPositiveButton("OK", null)
+                    .setTitle("No direct video files detected")
+                    .setMessage("Try the page extractor for supported streaming sites, including YouTube. "
+                            + "Otherwise, play the webpage video and tap Find videos again. "
+                            + "Protected and DRM streams remain unsupported.")
+                    .setNegativeButton("Close", null)
+                    .setPositiveButton("Try page extractor",
+                            (d, w) -> requestExtractPage(currentPage))
                     .show();
             return;
         }
@@ -500,6 +507,21 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("Close", null)
                 .create();
 
+        TextView extractor = text(
+                VideoUrlUtils.isYoutubeVideoPage(currentPage)
+                        ? "▶ Download this YouTube video (video + audio)"
+                        : "▶ Try extracting a video from this webpage",
+                14, 0xFF007765, true);
+        extractor.setPadding(dp(10), dp(15), dp(10), dp(15));
+        extractor.setBackground(rounded(0xFFD8FAF0, 10));
+        LinearLayout.LayoutParams extractParams = new LinearLayout.LayoutParams(-1, -2);
+        extractParams.bottomMargin = dp(14);
+        list.addView(extractor, extractParams);
+        extractor.setOnClickListener(v -> {
+            dialog.dismiss();
+            requestExtractPage(currentPage);
+        });
+
         ArrayList<VideoCandidate> choices = new ArrayList<>(videos.values());
         for (int i = 0; i < choices.size(); i++) {
             VideoCandidate candidate = choices.get(i);
@@ -511,10 +533,16 @@ public final class MainActivity extends Activity {
             heading.setMaxLines(2);
             item.addView(heading);
             TextView details = text(VideoUrlUtils.hostOf(candidate.url)
-                    + (candidate.isStream() ? " • Streaming playlist" : " • Direct file"),
+                    + (candidate.isStream() ? " • Streaming playlist"
+                    : (VideoUrlUtils.isYoutubeVideoPage(candidate.sourcePage)
+                    || VideoUrlUtils.isYoutubeVideoPage(candidate.url)
+                    ? " • Page extractor" : " • Direct file")),
                     12, 0xFF576F7D, false);
             item.addView(details);
-            TextView button = text(candidate.isStream() ? "Why can't I save this?" : "Download  ↓",
+            TextView button = text(candidate.isStream() ? "Open with page extractor"
+                    : (VideoUrlUtils.isYoutubeVideoPage(candidate.sourcePage)
+                    || VideoUrlUtils.isYoutubeVideoPage(candidate.url))
+                    ? "Extract video + audio  ↓" : "Download  ↓",
                     13, 0xFF007765, true);
             button.setPadding(0, dp(9), 0, dp(5));
             button.setOnClickListener(v -> {
@@ -530,6 +558,23 @@ public final class MainActivity extends Activity {
     }
 
     private void offerVideo(VideoCandidate video, String suggestedName, String userAgent) {
+        if (VideoUrlUtils.isYoutubeVideoPage(video.url)) {
+            requestExtractPage(video.url);
+            return;
+        }
+        if (VideoUrlUtils.isYoutubeVideoPage(video.sourcePage)) {
+            // A watch page can expose separate, temporary media URLs. Always extract
+            // the original video page, never enqueue those URLs as a complete MP4.
+            requestExtractPage(video.sourcePage);
+            return;
+        }
+        if (VideoUrlUtils.isYoutubeStreamEndpoint(video.url)) {
+            new AlertDialog.Builder(this).setTitle("Adaptive YouTube stream")
+                    .setMessage("That URL is a temporary media stream, not a full video file. "
+                            + "Open the original YouTube watch page and choose Extract video.")
+                    .setPositiveButton("OK", null).show();
+            return;
+        }
         if (!VideoUrlUtils.isHttpsUrl(video.url)) {
             new AlertDialog.Builder(this).setTitle("Unsupported link")
                     .setMessage("Only publicly addressable HTTPS video files can be downloaded.")
@@ -538,10 +583,14 @@ public final class MainActivity extends Activity {
         }
         if (video.isStream()) {
             new AlertDialog.Builder(this).setTitle("Streaming video")
-                    .setMessage("This link is an HLS/DASH playlist rather than a video file. "
-                            + "This version does not download or assemble segmented streams, "
-                            + "DRM-protected media, or blob videos.")
-                    .setPositiveButton("OK", null).show();
+                    .setMessage("This is an HLS/DASH playlist. Try the page extractor "
+                            + "to download supported non-DRM streams and merge their parts.")
+                    .setNegativeButton("Close", null)
+                    .setPositiveButton("Try page extractor",
+                            (d, w) -> requestExtractPage(
+                                    VideoUrlUtils.isHttpsUrl(video.sourcePage)
+                                            ? video.sourcePage : video.url))
+                    .show();
             return;
         }
         String mime = video.mimeType;
@@ -560,6 +609,23 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private void requestExtractPage(String url) {
+        if (pageExtractor == null || !VideoUrlUtils.isHttpsUrl(url)
+                || url.contains("appassets.androidplatform.net")) {
+            toast("Open a video webpage first.");
+            return;
+        }
+        if (Build.VERSION.SDK_INT <= 28 &&
+                checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED) {
+            pendingExtractorUrl = url;
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    PERMISSION_EXTRACTOR_STORAGE);
+            return;
+        }
+        pageExtractor.prompt(url);
+    }
+
     private void checkPermissionAndDownload(DownloadJob job) {
         if (Build.VERSION.SDK_INT <= 28 &&
                 checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
@@ -573,6 +639,17 @@ public final class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERMISSION_EXTRACTOR_STORAGE) {
+            String url = pendingExtractorUrl;
+            pendingExtractorUrl = null;
+            if (url != null && grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                requestExtractPage(url);
+            } else {
+                toast("Storage permission is required on Android 8 and 9.");
+            }
+            return;
+        }
         if (requestCode != PERMISSION_STORAGE || pendingPermissionDownload == null) return;
         DownloadJob job = pendingPermissionDownload;
         pendingPermissionDownload = null;
