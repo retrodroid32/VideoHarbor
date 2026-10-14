@@ -137,11 +137,14 @@ public final class PageExtractor {
                     new File(jobDir, "%(title).75B_[%(id)s].%(ext)s").getAbsolutePath());
 
             updateUi(message, progress, "Connecting to video source…", -1);
-            YoutubeDL.getInstance().execute(request, processId, (percentage, etaSeconds) -> {
-                if (cancel.get()) return;
-                int p = Math.min(100, Math.max(0, Math.round(percentage)));
-                updateUi(message, progress,
-                        "Downloading: " + p + "% | ETA " + Math.max(0, etaSeconds) + " sec", p);
+            YoutubeDL.getInstance().execute(request, processId, (percentage, etaSeconds, logLine) -> {
+                if (!cancel.get()) {
+                    int p = Math.min(100, Math.max(0, Math.round(percentage)));
+                    updateUi(message, progress,
+                            "Downloading: " + p + "% | ETA "
+                                    + Math.max(0, etaSeconds) + " sec", p);
+                }
+                return kotlin.Unit.INSTANCE;
             });
 
             if (cancel.get()) return;
